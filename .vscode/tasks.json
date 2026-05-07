@@ -1,0 +1,81 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cython: build debug extensions",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "rm -rf \"${workspaceFolder}/cython_debug\" && \"${workspaceFolder}/.venv/bin/python\" -m cython --gdb src/oracledb/base_impl.pyx && \"${workspaceFolder}/.venv/bin/python\" -m cython --gdb src/oracledb/thin_impl.pyx && \"${workspaceFolder}/.venv/bin/python\" -m cython --gdb src/oracledb/thick_impl.pyx && \"${workspaceFolder}/.venv/bin/python\" -m cython --gdb src/oracledb/arrow_impl.pyx && PYO_COMPILE_ARGS=\"-O0 -g3 -fno-omit-frame-pointer\" \"${workspaceFolder}/.venv/bin/python\" setup.py build_ext --inplace --force"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "cygdb: current file (thin)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "set -a && source \"${workspaceFolder}/.env\" && set +a && export PYTHONPATH=\"${workspaceFolder}/.venv/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}\" && PYO_SAMPLES_DRIVER_MODE=thin \"${workspaceFolder}/.venv/bin/cygdb\" --build-dir \"${workspaceFolder}\" -- --args \"${workspaceFolder}/.venv/bin/python\" \"${file}\""
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cython: build debug extensions",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "cygdb: return_numbers_as_decimals (thin)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "set -a && source \"${workspaceFolder}/.env\" && set +a && export PYTHONPATH=\"${workspaceFolder}/.venv/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}\" && PYO_SAMPLES_DRIVER_MODE=thin \"${workspaceFolder}/.venv/bin/cygdb\" --build-dir \"${workspaceFolder}\" -- --args \"${workspaceFolder}/.venv/bin/python\" \"${workspaceFolder}/samples/return_numbers_as_decimals.py\""
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cython: build debug extensions",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "cygdb: return_numbers_as_decimals (thick)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "set -a && source \"${workspaceFolder}/.env\" && set +a && export PYTHONPATH=\"${workspaceFolder}/.venv/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}\" && PYO_SAMPLES_DRIVER_MODE=thick \"${workspaceFolder}/.venv/bin/cygdb\" --build-dir \"${workspaceFolder}\" -- --args \"${workspaceFolder}/.venv/bin/python\" \"${workspaceFolder}/samples/return_numbers_as_decimals.py\""
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": "cython: build debug extensions",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ]
+}
