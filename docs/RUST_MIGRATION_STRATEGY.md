@@ -6,7 +6,7 @@
 
 ---
 
-## Phase 0: FFI 브릿지 구축 (선행 작업)
+## Phase 0: FFI 브릿지 구축 (완료)
 
 ```
 Python ←→ PyO3 (Rust) ←→ 내부 Rust 모듈
@@ -14,37 +14,140 @@ Python ←→ PyO3 (Rust) ←→ 내부 Rust 모듈
 
 PyO3로 Python extension module을 만들고, 기존 Cython `.so`와 **병렬 로드** 가능하게 세팅합니다. 하나의 함수 단위로 Rust 구현을 끼워넣을 수 있는 구조가 핵심입니다.
 
-### 프로젝트 구조 예시
+### 프로젝트 구조 (확정)
 
 ```
-src/oracledb/
-├── impl/
-│   ├── base/           # 기존 Cython (점진적으로 제거)
-│   └── thin/           # 기존 Cython
-├── _rust_impl/         # 새 Rust extension (PyO3)
-│   ├── src/
-│   │   ├── lib.rs
-│   │   ├── encoders.rs
-│   │   ├── decoders.rs
-│   │   ├── buffer.rs
-│   │   ├── converters.rs
-│   │   ├── vector.rs
-│   │   ├── oson.rs
-│   │   └── dbobject.rs
-│   └── Cargo.toml
+python-oracledb/
+├── rust/                           # Rust extension (PyO3) — 워크스페이스 루트
+│   ├── Cargo.toml
+│   ├── pyproject.toml
+│   └── src/
+│       ├── lib.rs                  # #[pymodule] 진입점
+│       ├── encoders.rs             # Phase 1
+│       ├── decoders.rs             # Phase 1
+│       ├── buffer.rs               # Phase 2
+│       ├── converters.rs           # Phase 3
+│       ├── vector.rs               # Phase 4
+│       ├── oson.rs                 # Phase 4
+│       └── dbobject.rs             # Phase 4
+├── src/oracledb/
+│   └── impl/
+│       ├── base/                   # 기존 Cython (점진적으로 Rust 호출로 교체)
+│       └── thin/                   # 기존 Cython
 ```
 
-### Fallback 패턴
+> **주의**: Rust 소스를 `src/oracledb/` 안에 두면 Python이 디렉토리를 패키지로 인식하여
+> `.so` 모듈을 가려버립니다. 반드시 패키지 경로 바깥(`rust/`)에 배치해야 합니다.
+
+### 빌드 & 설치
+
+```bash
+# 개발 빌드 (venv에 .so 직접 설치)
+cd rust/
+/path/to/.venv/bin/maturin develop --release
+
+# 확인
+.venv/bin/python -c "from _rust_impl import encode_number; print(encode_number(b'0'))"
+# → [128]  (0x80 = Oracle NUMBER zero)
+```
+
+### Cargo.toml
+
+```toml
+[package]
+name = "oracledb-rust-impl"
+version = "0.1.0"
+edition = "2021"       # ⚠️ Rust edition (2015/2018/2021/2024 중 택 1)
+
+[lib]
+name = "_rust_impl"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+```
+
+### pyproject.toml (maturin용)
+
+```toml
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "oracledb-rust-impl"
+version = "0.1.0"              # ⚠️ 필수 (없으면 빌드 실패)
+requires-python = ">=3.8"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+# module-name 미지정 → 독립 모듈로 설치 (from _rust_impl import ...)
+```
+
+### Import 경로
 
 ```python
-# src/oracledb/impl/base/encoders.pyx (또는 Python wrapper)
-try:
-    from oracledb._rust_impl import encode_number as _encode_number
-except ImportError:
-    from oracledb._cython_impl import encode_number as _encode_number
+# Rust 모듈은 독립 최상위 모듈로 설치됨
+from _rust_impl import encode_number, decode_number
 ```
 
-이 패턴으로 Rust 모듈이 준비 안 된 경로는 기존 Cython으로 위임합니다.
+### Fallback 패턴 (Cython → Rust 전환 방법)
+
+Cython 내부의 `encode_number`는 C 레벨 함수(`cdef`)이므로 Python에서 직접 import 불가합니다.
+따라서 **호출하는 쪽(`buffer.pyx`)을 수정**하여 Rust로 위임합니다:
+
+```cython
+# src/oracledb/impl/base/buffer.pyx
+
+# ────── Fallback 패턴 (모듈 상단) ──────
+cdef bint _USE_RUST = False
+try:
+    from _rust_impl import encode_number as _rust_encode_number
+    _USE_RUST = True
+except ImportError:
+    pass
+
+# ────── 교체 대상 함수 ──────
+cdef int write_oracle_number(self, bytes num_bytes) except -1:
+    if _USE_RUST:
+        cdef bytes encoded = _rust_encode_number(num_bytes)
+        self._write_raw_bytes_and_length(<char_type*>encoded, len(encoded))
+    else:
+        # 기존 Cython 경로 (원본 유지)
+        encode_number(buf, &buflen, num_bytes)
+        self._write_raw_bytes_and_length(buf, buflen)
+```
+
+이 패턴의 장점:
+- **환경변수/import 실패 기반 자동 fallback** — Rust 모듈이 없으면 기존 Cython으로 동작
+- **한 줄 수정으로 전환** — `_USE_RUST = True`면 Rust 경로
+- **Phase별 독립 배포** — encoder만 Rust여도 나머지는 Cython으로 유지
+
+### 교체 포인트 목록
+
+| 파일 | 함수 | 교체 대상 |
+|------|------|-----------|
+| `impl/base/buffer.pyx:628` | `write_oracle_number` | `encode_number` 호출 |
+| `impl/base/buffer.pyx` | `write_oracle_date` | `encode_date` 호출 |
+| `impl/base/buffer.pyx` | `write_binary_double` | `encode_binary_double` 호출 |
+| `impl/base/buffer.pyx` | `write_binary_float` | `encode_binary_float` 호출 |
+| `impl/base/buffer.pyx:165` | `read_oracle_data` | `decode_*` 호출 |
+| `impl/thin/dbobject.pyx:276` | `write_oracle_number` | DbObject 내 NUMBER |
+| `impl/base/oson.pyx:610` | `write_oracle_number` | OSON 내 NUMBER |
+
+### Phase 0 완료 확인
+
+```bash
+# Rust 빌드
+cd rust/ && maturin develop --release
+
+# Rust 단위 테스트
+cargo test
+
+# Python에서 호출 확인
+.venv/bin/python -c "from _rust_impl import encode_number; print(encode_number(b'0'))"
+# [128]
+```
 
 ---
 
@@ -116,7 +219,7 @@ fn test_encode_binary_double_positive() {
 ```python
 # tests/test_rust_encoders.py
 import pytest
-from oracledb._rust_impl import encode_number, decode_number
+from _rust_impl import encode_number, decode_number
 
 @pytest.mark.parametrize("value", [
     "0", "1", "-1", "123.45", "-0.001", "9999999999999999999999999999999999999999",
@@ -297,7 +400,7 @@ fn test_vector_encode_sparse() {
 ```python
 # tests/test_rust_oson.py
 import json
-from oracledb._rust_impl import oson_encode, oson_decode
+from _rust_impl import oson_encode, oson_decode
 
 @pytest.mark.parametrize("value", [
     {"name": "test", "age": 30},
@@ -511,3 +614,82 @@ criterion_main!(benches);
 - [ ] 기존 `tests/` 전체 통과 (Rust 백엔드로)
 - [ ] 성능 벤치마크: Cython 대비 동등 이상
 - [ ] Memory leak 없음 (`valgrind` 또는 Rust sanitizer)
+
+---
+
+## 기존 테스트 활용 가이드
+
+### 테스트 의존성 설치
+
+```bash
+uv pip install numpy pandas pyarrow --python .venv/bin/python
+```
+
+### Phase별 기존 테스트 파일 매핑
+
+기존 `tests/` 디렉토리의 테스트는 **실제 Oracle DB 연결이 필요**한 E2E 테스트입니다.
+Rust 교체 후 이 테스트가 그대로 통과하면 wire 호환성이 검증됩니다.
+
+#### Phase 1 (Encoder/Decoder) 관련
+
+| 테스트 파일 | 대상 | 우선도 |
+|------------|------|--------|
+| `tests/test_2200_number_var.py` | NUMBER encode/decode | ★★★ |
+| `tests/test_1400_datetime_var.py` | DATE/TIMESTAMP encode/decode | ★★★ |
+| `tests/test_1800_interval_var.py` | INTERVAL_DS encode/decode | ★★☆ |
+| `tests/test_7100_interval_ym_var.py` | INTERVAL_YM encode/decode | ★★☆ |
+| `tests/test_3100_boolean_var.py` | BOOLEAN encode/decode | ★☆☆ |
+
+#### Phase 2~3 (Buffer + Converter) 관련
+
+| 테스트 파일 | 대상 |
+|------------|------|
+| `tests/test_2500_string_var.py` | VARCHAR/CHAR (raw bytes 경로) |
+| `tests/test_2100_nchar_var.py` | NCHAR (UTF-16 경로) |
+| `tests/test_1500_types.py` | 전반적 타입 매핑 |
+| `tests/test_3600_outputtypehandler.py` | `_py_type_num` 라우팅 변경 |
+| `tests/test_3800_typehandler.py` | converter 전체 경로 |
+| `tests/test_4600_type_changes.py` | 타입 변경 시나리오 |
+
+#### Phase 4 (특수 타입) 관련
+
+| 테스트 파일 | 대상 |
+|------------|------|
+| `tests/test_6400_vector_var.py` | VECTOR (FLOAT32/64) |
+| `tests/test_7500_binary_vector.py` | VECTOR (BINARY format) |
+| `tests/test_7700_sparse_vector.py` | Sparse VECTOR |
+| `tests/test_6500_vector_interop.py` | VECTOR 상호운용성 |
+| `tests/test_3500_json.py` | JSON/OSON |
+| `tests/test_6700_json_23.py` | JSON (23c 기능) |
+| `tests/test_6900_oson.py` | OSON 직접 |
+| `tests/test_2300_object_var.py` | DbObject (UDT/VARRAY) |
+| `tests/test_1900_lob_var.py` | LOB |
+
+### 테스트 실행 방법
+
+```bash
+# Rust 단위 테스트 (DB 불필요, 빠름)
+cd rust/ && cargo test
+
+# Python FFI 테스트 (DB 불필요)
+.venv/bin/python -m pytest tests/test_rust_encoders.py -v
+
+# DB 연결 E2E 테스트 (Phase 1 검증)
+.venv/bin/python -m pytest tests/test_2200_number_var.py tests/test_1400_datetime_var.py -v
+
+# 전체 타입 관련 E2E
+.venv/bin/python -m pytest tests/test_2200_number_var.py tests/test_1400_datetime_var.py \
+    tests/test_1800_interval_var.py tests/test_7100_interval_ym_var.py \
+    tests/test_3100_boolean_var.py tests/test_2500_string_var.py -v
+```
+
+### 개발 사이클
+
+```
+1. Rust 구현    →  cargo test (known-answer)
+2. 빌드        →  cd rust/ && maturin develop --release
+3. FFI 확인    →  python -c "from _rust_impl import ..."
+4. Fallback    →  buffer.pyx에서 _USE_RUST = True
+5. Cython 빌드 →  python setup.py build_ext --inplace --force
+6. E2E 검증    →  pytest tests/test_2200_number_var.py
+```
