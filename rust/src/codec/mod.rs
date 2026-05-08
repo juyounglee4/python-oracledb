@@ -7,6 +7,11 @@ pub mod number;
 pub mod varchar;
 pub mod vector;
 
+pub use binary_float::{
+    encode_binary_float, decode_binary_float,
+    encode_binary_double, decode_binary_double,
+};
+
 use pyo3::prelude::*;
 
 use crate::error::CodecError;
