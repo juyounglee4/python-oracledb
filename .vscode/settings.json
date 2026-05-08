@@ -1,0 +1,7 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "rust/Cargo.toml"
+    ],
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": ["--", "-W", "clippy::todo", "-W", "clippy::unimplemented"]
+}
